@@ -1,11 +1,14 @@
 package de.lagerraum.app;
 
 import android.app.Activity;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.util.Base64;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
@@ -29,6 +32,7 @@ import java.io.ByteArrayOutputStream;
 public class MainActivity extends Activity {
   private static final int FILE_CHOOSER = 1001;
   private static final int QR_CAMERA = 2001;
+  private static final int NOTIFICATION_PERMISSION = 3002;
 
   private WebView webView;
   private ValueCallback<Uri[]> fileCallback;
@@ -103,6 +107,42 @@ public class MainActivity extends Activity {
           notifyQrError("Kamera konnte nicht geöffnet werden.");
         }
       });
+    }
+
+    @JavascriptInterface
+    public void updateNotifications(boolean enabled, String time, String dataJson) {
+      getSharedPreferences(NotificationScheduler.PREFS, MODE_PRIVATE)
+          .edit()
+          .putBoolean(NotificationScheduler.KEY_ENABLED, enabled)
+          .putString(NotificationScheduler.KEY_TIME, time == null ? "09:00" : time)
+          .putString(NotificationScheduler.KEY_DATA, dataJson == null ? "{}" : dataJson)
+          .apply();
+
+      if (enabled && Build.VERSION.SDK_INT >= 33 &&
+          checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        runOnUiThread(() -> requestPermissions(
+            new String[]{Manifest.permission.POST_NOTIFICATIONS},
+            NOTIFICATION_PERMISSION));
+      }
+
+      NotificationScheduler.scheduleNext(MainActivity.this);
+    }
+
+    @JavascriptInterface
+    public void testNotification(String dataJson) {
+      getSharedPreferences(NotificationScheduler.PREFS, MODE_PRIVATE)
+          .edit()
+          .putString(NotificationScheduler.KEY_DATA, dataJson == null ? "{}" : dataJson)
+          .apply();
+
+      if (Build.VERSION.SDK_INT >= 33 &&
+          checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        runOnUiThread(() -> requestPermissions(
+            new String[]{Manifest.permission.POST_NOTIFICATIONS},
+            NOTIFICATION_PERMISSION));
+        return;
+      }
+      NotificationReceiver.showNotification(MainActivity.this, true);
     }
 
     @JavascriptInterface
