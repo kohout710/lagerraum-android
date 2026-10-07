@@ -10,6 +10,7 @@ import android.graphics.RectF;
 import android.os.Bundle;
 import android.util.Size;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -20,6 +21,7 @@ import androidx.annotation.NonNull;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
+import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
@@ -27,12 +29,18 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.mlkit.vision.barcode.BarcodeScanner;
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions;
-import com.google.mlkit.vision.barcode.BarcodeScanning;
-import com.google.mlkit.vision.barcode.common.Barcode;
-import com.google.mlkit.vision.common.InputImage;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.DecodeHintType;
+import com.google.zxing.MultiFormatReader;
+import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.Result;
+import com.google.zxing.common.HybridBinarizer;
 
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -42,11 +50,10 @@ public class ScannerActivity extends ComponentActivity {
 
   private PreviewView previewView;
   private ExecutorService cameraExecutor;
-  private BarcodeScanner barcodeScanner;
   private Camera camera;
-  private final AtomicBoolean processing = new AtomicBoolean(false);
   private final AtomicBoolean finished = new AtomicBoolean(false);
   private Button torchButton;
+  private TextView statusText;
 
   @Override protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
@@ -82,6 +89,21 @@ public class ScannerActivity extends ComponentActivity {
     hintParams.rightMargin = dp(18);
     root.addView(hint, hintParams);
 
+    statusText = new TextView(this);
+    statusText.setText("Suche QR-Code …");
+    statusText.setTextColor(Color.WHITE);
+    statusText.setTextSize(16f);
+    statusText.setGravity(Gravity.CENTER);
+    statusText.setBackgroundColor(0x88000000);
+    FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        dp(48));
+    statusParams.gravity = Gravity.BOTTOM;
+    statusParams.bottomMargin = dp(94);
+    statusParams.leftMargin = dp(18);
+    statusParams.rightMargin = dp(18);
+    root.addView(statusText, statusParams);
+
     Button cancel = new Button(this);
     cancel.setText("Abbrechen");
     FrameLayout.LayoutParams cancelParams = new FrameLayout.LayoutParams(
@@ -104,10 +126,6 @@ public class ScannerActivity extends ComponentActivity {
 
     setContentView(root);
 
-    BarcodeScannerOptions options = new BarcodeScannerOptions.Builder()
-        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-        .build();
-    barcodeScanner = BarcodeScanning.getClient(options);
     cameraExecutor = Executors.newSingleThreadExecutor();
 
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -136,41 +154,29 @@ public class ScannerActivity extends ComponentActivity {
             .build();
 
         analysis.setAnalyzer(cameraExecutor, imageProxy -> {
-          if (finished.get() || !processing.compareAndSet(false, true)) {
+          if (finished.get()) {
             imageProxy.close();
             return;
           }
 
-          if (imageProxy.getImage() == null) {
-            processing.set(false);
+          try {
+            String decoded = decodeQr(imageProxy);
+            if (decoded != null && !decoded.trim().isEmpty()) {
+              if (finished.compareAndSet(false, true)) {
+                runOnUiThread(() -> {
+                  statusText.setText("QR-Code erkannt");
+                  previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
+                  Intent data = new Intent();
+                  data.putExtra("qr_value", decoded);
+                  setResult(RESULT_OK, data);
+                  finish();
+                });
+              }
+            }
+          } catch (Throwable ignored) {
+          } finally {
             imageProxy.close();
-            return;
           }
-
-          InputImage image = InputImage.fromMediaImage(
-              imageProxy.getImage(),
-              imageProxy.getImageInfo().getRotationDegrees());
-
-          barcodeScanner.process(image)
-              .addOnSuccessListener(barcodes -> {
-                if (finished.get()) return;
-                for (Barcode barcode : barcodes) {
-                  String value = barcode.getRawValue();
-                  if (value != null && !value.trim().isEmpty()) {
-                    if (finished.compareAndSet(false, true)) {
-                      Intent data = new Intent();
-                      data.putExtra("qr_value", value);
-                      setResult(RESULT_OK, data);
-                      finish();
-                    }
-                    break;
-                  }
-                }
-              })
-              .addOnCompleteListener(task -> {
-                processing.set(false);
-                imageProxy.close();
-              });
         });
 
         provider.unbindAll();
@@ -188,6 +194,68 @@ public class ScannerActivity extends ComponentActivity {
         finish();
       }
     }, ContextCompat.getMainExecutor(this));
+  }
+
+  private String decodeQr(ImageProxy imageProxy) {
+    ImageProxy.PlaneProxy[] planes = imageProxy.getPlanes();
+    if (planes == null || planes.length == 0) return null;
+
+    int width = imageProxy.getWidth();
+    int height = imageProxy.getHeight();
+    int rowStride = planes[0].getRowStride();
+
+    ByteBuffer buffer = planes[0].getBuffer();
+    buffer.rewind();
+    byte[] raw = new byte[buffer.remaining()];
+    buffer.get(raw);
+
+    byte[] y = new byte[width * height];
+    if (rowStride == width) {
+      System.arraycopy(raw, 0, y, 0, Math.min(y.length, raw.length));
+    } else {
+      for (int row = 0; row < height; row++) {
+        int src = row * rowStride;
+        int dst = row * width;
+        if (src + width <= raw.length) {
+          System.arraycopy(raw, src, y, dst, width);
+        }
+      }
+    }
+
+    MultiFormatReader reader = new MultiFormatReader();
+    Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
+    hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
+    hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
+    reader.setHints(hints);
+
+    Result result = tryDecode(reader, y, width, height, 0, 0, width, height);
+    if (result != null) return result.getText();
+
+    int crop = (int)(Math.min(width, height) * 0.82f);
+    int left = Math.max(0, (width - crop) / 2);
+    int top = Math.max(0, (height - crop) / 2);
+    result = tryDecode(reader, y, width, height, left, top, crop, crop);
+    return result == null ? null : result.getText();
+  }
+
+  private Result tryDecode(
+      MultiFormatReader reader,
+      byte[] y,
+      int dataWidth,
+      int dataHeight,
+      int left,
+      int top,
+      int width,
+      int height) {
+    try {
+      PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(
+          y, dataWidth, dataHeight, left, top, width, height, false);
+      BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
+      return reader.decodeWithState(bitmap);
+    } catch (Throwable t) {
+      reader.reset();
+      return null;
+    }
   }
 
   private void toggleTorch() {
@@ -214,7 +282,6 @@ public class ScannerActivity extends ComponentActivity {
   }
 
   @Override protected void onDestroy() {
-    if (barcodeScanner != null) barcodeScanner.close();
     if (cameraExecutor != null) cameraExecutor.shutdown();
     super.onDestroy();
   }
