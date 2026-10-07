@@ -3,12 +3,14 @@ package de.lagerraum.app;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Bundle;
-import android.util.Size;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
@@ -20,8 +22,8 @@ import androidx.activity.ComponentActivity;
 import androidx.annotation.NonNull;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
-import androidx.camera.core.ImageAnalysis;
-import androidx.camera.core.ImageProxy;
+import androidx.camera.core.ImageCapture;
+import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
@@ -35,11 +37,11 @@ import com.google.zxing.DecodeHintType;
 import com.google.zxing.InvertedLuminanceSource;
 import com.google.zxing.LuminanceSource;
 import com.google.zxing.MultiFormatReader;
-import com.google.zxing.PlanarYUVLuminanceSource;
+import com.google.zxing.RGBLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.common.HybridBinarizer;
 
-import java.nio.ByteBuffer;
+import java.io.File;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.Map;
@@ -53,8 +55,10 @@ public class ScannerActivity extends ComponentActivity {
   private PreviewView previewView;
   private ExecutorService cameraExecutor;
   private Camera camera;
-  private final AtomicBoolean finished = new AtomicBoolean(false);
+  private ImageCapture imageCapture;
+  private final AtomicBoolean busy = new AtomicBoolean(false);
   private Button torchButton;
+  private Button captureButton;
   private TextView statusText;
 
   @Override protected void onCreate(Bundle savedInstanceState) {
@@ -77,7 +81,7 @@ public class ScannerActivity extends ComponentActivity {
         FrameLayout.LayoutParams.MATCH_PARENT));
 
     TextView hint = new TextView(this);
-    hint.setText("QR-Code in den Rahmen halten");
+    hint.setText("QR-Code vollständig in den Rahmen legen");
     hint.setTextColor(Color.WHITE);
     hint.setTextSize(18f);
     hint.setGravity(Gravity.CENTER);
@@ -91,25 +95,36 @@ public class ScannerActivity extends ComponentActivity {
     root.addView(hint, hintParams);
 
     statusText = new TextView(this);
-    statusText.setText("Suche QR-Code …");
+    statusText.setText("Wenn der Code ruhig im Rahmen liegt, Foto aufnehmen.");
     statusText.setTextColor(Color.WHITE);
-    statusText.setTextSize(16f);
+    statusText.setTextSize(15f);
     statusText.setGravity(Gravity.CENTER);
     statusText.setBackgroundColor(0x88000000);
     FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT, dp(48));
+        FrameLayout.LayoutParams.MATCH_PARENT, dp(54));
     statusParams.gravity = Gravity.BOTTOM;
-    statusParams.bottomMargin = dp(94);
+    statusParams.bottomMargin = dp(156);
     statusParams.leftMargin = dp(18);
     statusParams.rightMargin = dp(18);
     root.addView(statusText, statusParams);
+
+    captureButton = new Button(this);
+    captureButton.setText("QR-Code fotografieren");
+    FrameLayout.LayoutParams captureParams = new FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT, dp(58));
+    captureParams.gravity = Gravity.BOTTOM;
+    captureParams.leftMargin = dp(18);
+    captureParams.rightMargin = dp(18);
+    captureParams.bottomMargin = dp(88);
+    root.addView(captureButton, captureParams);
+    captureButton.setOnClickListener(v -> captureQr());
 
     Button cancel = new Button(this);
     cancel.setText("Abbrechen");
     FrameLayout.LayoutParams cancelParams = new FrameLayout.LayoutParams(dp(140), dp(54));
     cancelParams.gravity = Gravity.BOTTOM | Gravity.START;
     cancelParams.leftMargin = dp(18);
-    cancelParams.bottomMargin = dp(28);
+    cancelParams.bottomMargin = dp(24);
     root.addView(cancel, cancelParams);
     cancel.setOnClickListener(v -> finish());
 
@@ -118,7 +133,7 @@ public class ScannerActivity extends ComponentActivity {
     FrameLayout.LayoutParams torchParams = new FrameLayout.LayoutParams(dp(160), dp(54));
     torchParams.gravity = Gravity.BOTTOM | Gravity.END;
     torchParams.rightMargin = dp(18);
-    torchParams.bottomMargin = dp(28);
+    torchParams.bottomMargin = dp(24);
     root.addView(torchButton, torchParams);
     torchButton.setOnClickListener(v -> toggleTorch());
 
@@ -141,148 +156,143 @@ public class ScannerActivity extends ComponentActivity {
         Preview preview = new Preview.Builder().build();
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
-        ImageAnalysis analysis = new ImageAnalysis.Builder()
-            .setTargetResolution(new Size(1280, 720))
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        imageCapture = new ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build();
 
-        analysis.setAnalyzer(cameraExecutor, imageProxy -> {
-          if (finished.get()) {
-            imageProxy.close();
-            return;
-          }
-          try {
-            String decoded = decodeQr(imageProxy);
-            if (decoded != null && !decoded.trim().isEmpty() && finished.compareAndSet(false, true)) {
-              runOnUiThread(() -> {
-                statusText.setText("QR-Code erkannt");
-                previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
-                Intent data = new Intent();
-                data.putExtra("qr_value", decoded);
-                setResult(RESULT_OK, data);
-                finish();
-              });
-            }
-          } catch (Throwable ignored) {
-          } finally {
-            imageProxy.close();
-          }
-        });
-
         provider.unbindAll();
-        camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
+        camera = provider.bindToLifecycle(
+            this,
+            CameraSelector.DEFAULT_BACK_CAMERA,
+            preview,
+            imageCapture);
 
         boolean hasFlash = camera.getCameraInfo().hasFlashUnit();
         torchButton.setEnabled(hasFlash);
         if (!hasFlash) torchButton.setText("Keine Lampe");
       } catch (Throwable t) {
-        setResult(RESULT_CANCELED);
-        finish();
+        statusText.setText("Kamera konnte nicht gestartet werden.");
+        captureButton.setEnabled(false);
       }
     }, ContextCompat.getMainExecutor(this));
   }
 
-  private String decodeQr(ImageProxy imageProxy) {
-    ImageProxy.PlaneProxy plane = imageProxy.getPlanes()[0];
-    int width = imageProxy.getWidth();
-    int height = imageProxy.getHeight();
-    int rowStride = plane.getRowStride();
-    int pixelStride = plane.getPixelStride();
+  private void captureQr() {
+    if (imageCapture == null || !busy.compareAndSet(false, true)) return;
 
-    ByteBuffer buffer = plane.getBuffer();
-    buffer.rewind();
-    byte[] raw = new byte[buffer.remaining()];
-    buffer.get(raw);
+    captureButton.setEnabled(false);
+    statusText.setText("Foto wird ausgewertet …");
 
-    byte[] y = new byte[width * height];
-    for (int row = 0; row < height; row++) {
-      int rowStart = row * rowStride;
-      for (int col = 0; col < width; col++) {
-        int src = rowStart + col * pixelStride;
-        if (src < raw.length) y[row * width + col] = raw[src];
-      }
-    }
-
-    int rotation = imageProxy.getImageInfo().getRotationDegrees();
-    RotatedLuma rotated = rotate(y, width, height, rotation);
-
-    MultiFormatReader reader = new MultiFormatReader();
-    Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
-    hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
-    hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
-    hints.put(DecodeHintType.CHARACTER_SET, "UTF-8");
-    reader.setHints(hints);
-
-    Result result = decodeSource(reader, rotated.data, rotated.width, rotated.height, false);
-    if (result == null) result = decodeSource(reader, rotated.data, rotated.width, rotated.height, true);
-
-    if (result == null) {
-      int crop = (int)(Math.min(rotated.width, rotated.height) * 0.88f);
-      int left = Math.max(0, (rotated.width - crop) / 2);
-      int top = Math.max(0, (rotated.height - crop) / 2);
-      result = decodeCrop(reader, rotated.data, rotated.width, rotated.height, left, top, crop, crop, false);
-      if (result == null) result = decodeCrop(reader, rotated.data, rotated.width, rotated.height, left, top, crop, crop, true);
-    }
-
-    return result == null ? null : result.getText();
-  }
-
-  private Result decodeSource(MultiFormatReader reader, byte[] data, int width, int height, boolean inverted) {
-    return decodeCrop(reader, data, width, height, 0, 0, width, height, inverted);
-  }
-
-  private Result decodeCrop(MultiFormatReader reader, byte[] data, int dataWidth, int dataHeight,
-                            int left, int top, int width, int height, boolean inverted) {
     try {
-      LuminanceSource source = new PlanarYUVLuminanceSource(
-          data, dataWidth, dataHeight, left, top, width, height, false);
-      if (inverted) source = new InvertedLuminanceSource(source);
-      BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
-      Result result = reader.decodeWithState(bitmap);
-      reader.reset();
-      return result;
+      File photo = File.createTempFile("lagerraum_qr_", ".jpg", getCacheDir());
+      ImageCapture.OutputFileOptions options =
+          new ImageCapture.OutputFileOptions.Builder(photo).build();
+
+      imageCapture.takePicture(
+          options,
+          cameraExecutor,
+          new ImageCapture.OnImageSavedCallback() {
+            @Override public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+              try {
+                Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
+                String decoded = decodeBitmap(bitmap);
+                photo.delete();
+
+                if (decoded != null && !decoded.trim().isEmpty()) {
+                  runOnUiThread(() -> {
+                    previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
+                    statusText.setText("QR-Code erkannt");
+                    Intent data = new Intent();
+                    data.putExtra("qr_value", decoded);
+                    setResult(RESULT_OK, data);
+                    finish();
+                  });
+                } else {
+                  runOnUiThread(() -> {
+                    statusText.setText("Nicht erkannt. Code größer, scharf und vollständig im Rahmen platzieren.");
+                    captureButton.setEnabled(true);
+                    busy.set(false);
+                  });
+                }
+              } catch (Throwable t) {
+                photo.delete();
+                runOnUiThread(() -> {
+                  statusText.setText("Foto konnte nicht ausgewertet werden. Bitte erneut versuchen.");
+                  captureButton.setEnabled(true);
+                  busy.set(false);
+                });
+              }
+            }
+
+            @Override public void onError(@NonNull ImageCaptureException exception) {
+              runOnUiThread(() -> {
+                statusText.setText("Foto konnte nicht aufgenommen werden.");
+                captureButton.setEnabled(true);
+                busy.set(false);
+              });
+            }
+          });
     } catch (Throwable t) {
-      reader.reset();
+      statusText.setText("Foto konnte nicht vorbereitet werden.");
+      captureButton.setEnabled(true);
+      busy.set(false);
+    }
+  }
+
+  private String decodeBitmap(Bitmap original) {
+    if (original == null) return null;
+
+    int[] angles = new int[]{0, 90, 180, 270};
+    for (int angle : angles) {
+      Bitmap bitmap = angle == 0 ? original : rotateBitmap(original, angle);
+
+      Result result = decodeBitmapOnce(bitmap, false);
+      if (result == null) result = decodeBitmapOnce(bitmap, true);
+      if (result != null) return result.getText();
+
+      int size = Math.min(bitmap.getWidth(), bitmap.getHeight());
+      int cropSize = Math.max(1, (int)(size * 0.86f));
+      int left = Math.max(0, (bitmap.getWidth() - cropSize) / 2);
+      int top = Math.max(0, (bitmap.getHeight() - cropSize) / 2);
+      Bitmap crop = Bitmap.createBitmap(bitmap, left, top, cropSize, cropSize);
+
+      result = decodeBitmapOnce(crop, false);
+      if (result == null) result = decodeBitmapOnce(crop, true);
+      if (crop != bitmap) crop.recycle();
+      if (result != null) return result.getText();
+
+      if (bitmap != original) bitmap.recycle();
+    }
+    return null;
+  }
+
+  private Result decodeBitmapOnce(Bitmap bitmap, boolean inverted) {
+    try {
+      int width = bitmap.getWidth();
+      int height = bitmap.getHeight();
+      int[] pixels = new int[width * height];
+      bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+      LuminanceSource source = new RGBLuminanceSource(width, height, pixels);
+      if (inverted) source = new InvertedLuminanceSource(source);
+
+      BinaryBitmap binary = new BinaryBitmap(new HybridBinarizer(source));
+      MultiFormatReader reader = new MultiFormatReader();
+      Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
+      hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
+      hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
+      hints.put(DecodeHintType.CHARACTER_SET, "UTF-8");
+      reader.setHints(hints);
+      return reader.decodeWithState(binary);
+    } catch (Throwable t) {
       return null;
     }
   }
 
-  private RotatedLuma rotate(byte[] src, int width, int height, int rotation) {
-    if (rotation == 90) {
-      byte[] out = new byte[src.length];
-      for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-          out[x * height + (height - 1 - y)] = src[y * width + x];
-        }
-      }
-      return new RotatedLuma(out, height, width);
-    }
-    if (rotation == 180) {
-      byte[] out = new byte[src.length];
-      for (int i = 0; i < src.length; i++) out[src.length - 1 - i] = src[i];
-      return new RotatedLuma(out, width, height);
-    }
-    if (rotation == 270) {
-      byte[] out = new byte[src.length];
-      for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-          out[(width - 1 - x) * height + y] = src[y * width + x];
-        }
-      }
-      return new RotatedLuma(out, height, width);
-    }
-    return new RotatedLuma(src, width, height);
-  }
-
-  private static class RotatedLuma {
-    final byte[] data;
-    final int width;
-    final int height;
-    RotatedLuma(byte[] data, int width, int height) {
-      this.data = data;
-      this.width = width;
-      this.height = height;
-    }
+  private Bitmap rotateBitmap(Bitmap source, int degrees) {
+    Matrix matrix = new Matrix();
+    matrix.postRotate(degrees);
+    return Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
   }
 
   private void toggleTorch() {
@@ -334,7 +344,7 @@ public class ScannerActivity extends ComponentActivity {
       float h = getHeight();
       float size = Math.min(w * 0.78f, h * 0.46f);
       float left = (w - size) / 2f;
-      float top = (h - size) / 2f - h * 0.05f;
+      float top = (h - size) / 2f - h * 0.08f;
       RectF box = new RectF(left, top, left + size, top + size);
 
       canvas.drawRect(0, 0, w, box.top, shade);
