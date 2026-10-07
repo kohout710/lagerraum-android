@@ -4,14 +4,26 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Base64;
+import android.view.WindowInsets;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+
+import com.google.zxing.BarcodeFormat;
+import com.journeyapps.barcodescanner.BarcodeEncoder;
+import com.google.zxing.integration.android.IntentIntegrator;
+import com.google.zxing.integration.android.IntentResult;
+
+import java.io.ByteArrayOutputStream;
 
 public class MainActivity extends Activity {
   private static final int FILE_CHOOSER = 1001;
@@ -21,7 +33,21 @@ public class MainActivity extends Activity {
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
+
+    getWindow().setStatusBarColor(Color.rgb(15, 20, 16));
+    getWindow().setNavigationBarColor(Color.rgb(15, 20, 16));
+
     webView = new WebView(this);
+    webView.setBackgroundColor(Color.rgb(15, 20, 16));
+    webView.setOnApplyWindowInsetsListener((v, insets) -> {
+      if (android.os.Build.VERSION.SDK_INT >= 30) {
+        android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+        v.setPadding(0, bars.top, 0, bars.bottom);
+      } else {
+        v.setPadding(0, insets.getSystemWindowInsetTop(), 0, insets.getSystemWindowInsetBottom());
+      }
+      return insets;
+    });
     setContentView(webView);
 
     WebSettings s = webView.getSettings();
@@ -30,6 +56,7 @@ public class MainActivity extends Activity {
     s.setDatabaseEnabled(true);
     s.setAllowFileAccess(true);
 
+    webView.addJavascriptInterface(new AndroidBridge(), "Android");
     webView.setWebViewClient(new WebViewClient());
     webView.setWebChromeClient(new WebChromeClient() {
       @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -62,7 +89,43 @@ public class MainActivity extends Activity {
     else webView.restoreState(state);
   }
 
+  public class AndroidBridge {
+    @JavascriptInterface
+    public void scanQr() {
+      runOnUiThread(() -> {
+        IntentIntegrator integrator = new IntentIntegrator(MainActivity.this);
+        integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
+        integrator.setPrompt("QR-Code scannen");
+        integrator.setBeepEnabled(true);
+        integrator.setOrientationLocked(false);
+        integrator.initiateScan();
+      });
+    }
+
+    @JavascriptInterface
+    public String generateQr(String content) {
+      try {
+        BarcodeEncoder encoder = new BarcodeEncoder();
+        Bitmap bitmap = encoder.encodeBitmap(content, BarcodeFormat.QR_CODE, 700, 700);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+        return "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+      } catch (Exception e) {
+        return "";
+      }
+    }
+  }
+
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    IntentResult scan = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+    if (scan != null) {
+      if (scan.getContents() != null && webView != null) {
+        String json = org.json.JSONObject.quote(scan.getContents());
+        webView.evaluateJavascript("window.onNativeQrScanned(" + json + ")", null);
+      }
+      return;
+    }
+
     super.onActivityResult(requestCode, resultCode, data);
     if (requestCode == FILE_CHOOSER && fileCallback != null) {
       fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
