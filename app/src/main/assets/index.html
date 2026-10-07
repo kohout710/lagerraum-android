@@ -57,6 +57,7 @@ function renderLocations(){title('Lagerorte');$('#app').innerHTML='<div class="l
 function showQr(kind,id,name){title('QR-Code');const payload=kind+':'+id;let src='';if(window.Android&&Android.generateQr)src=Android.generateQr(payload);$('#app').innerHTML='<div class="card qrbox"><h2>'+esc(name)+'</h2>'+(src?'<img src="'+src+'" alt="QR-Code">':'<p>QR-Erzeugung nicht verfügbar.</p>')+'<p class="muted">'+esc(payload)+'</p><p class="muted">Diesen QR-Code kannst du ausdrucken oder von einem zweiten Bildschirm scannen.</p></div>'}
 function handleQr(code){if(!code)return;let i=null,l=null;if(code.startsWith('ITEM:'))i=db.items.find(x=>x.id===code.slice(5));else if(code.startsWith('LOC:'))l=db.locations.find(x=>x.id===code.slice(4));else i=db.items.find(x=>x.qr===code);if(l){activeScanLocation=l.id;renderScan();return}if(i){showItem(i.id);return}if(confirm('Dieser QR-Code ist noch unbekannt. Soll damit ein neuer Artikel angelegt werden?')){pendingQr=code;go('add')}}
 window.onNativeQrScanned=code=>handleQr(code);
+window.onNativeQrError=message=>alert(message||'QR-Scanner konnte nicht gestartet werden.');
 render();
 </script>
 </body>
