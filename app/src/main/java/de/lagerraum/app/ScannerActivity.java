@@ -11,6 +11,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Bundle;
+import android.net.Uri;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
@@ -40,6 +41,11 @@ import com.google.zxing.MultiFormatReader;
 import com.google.zxing.RGBLuminanceSource;
 import com.google.zxing.Result;
 import com.google.zxing.common.HybridBinarizer;
+import com.google.mlkit.vision.barcode.BarcodeScanner;
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions;
+import com.google.mlkit.vision.barcode.BarcodeScanning;
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.common.InputImage;
 
 import java.io.File;
 import java.util.Collections;
@@ -60,6 +66,7 @@ public class ScannerActivity extends ComponentActivity {
   private Button torchButton;
   private Button captureButton;
   private TextView statusText;
+  private BarcodeScanner mlScanner;
 
   @Override protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
@@ -139,6 +146,10 @@ public class ScannerActivity extends ComponentActivity {
 
     setContentView(root);
     cameraExecutor = Executors.newSingleThreadExecutor();
+    BarcodeScannerOptions mlOptions = new BarcodeScannerOptions.Builder()
+        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+        .build();
+    mlScanner = BarcodeScanning.getClient(mlOptions);
 
     if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
       startCamera();
@@ -157,7 +168,7 @@ public class ScannerActivity extends ComponentActivity {
         preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
         imageCapture = new ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .build();
 
         provider.unbindAll();
@@ -193,35 +204,7 @@ public class ScannerActivity extends ComponentActivity {
           cameraExecutor,
           new ImageCapture.OnImageSavedCallback() {
             @Override public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
-              try {
-                Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
-                String decoded = decodeBitmap(bitmap);
-                photo.delete();
-
-                if (decoded != null && !decoded.trim().isEmpty()) {
-                  runOnUiThread(() -> {
-                    previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
-                    statusText.setText("QR-Code erkannt");
-                    Intent data = new Intent();
-                    data.putExtra("qr_value", decoded);
-                    setResult(RESULT_OK, data);
-                    finish();
-                  });
-                } else {
-                  runOnUiThread(() -> {
-                    statusText.setText("Nicht erkannt. Code größer, scharf und vollständig im Rahmen platzieren.");
-                    captureButton.setEnabled(true);
-                    busy.set(false);
-                  });
-                }
-              } catch (Throwable t) {
-                photo.delete();
-                runOnUiThread(() -> {
-                  statusText.setText("Foto konnte nicht ausgewertet werden. Bitte erneut versuchen.");
-                  captureButton.setEnabled(true);
-                  busy.set(false);
-                });
-              }
+              analyzePhoto(photo);
             }
 
             @Override public void onError(@NonNull ImageCaptureException exception) {
@@ -237,6 +220,80 @@ public class ScannerActivity extends ComponentActivity {
       captureButton.setEnabled(true);
       busy.set(false);
     }
+  }
+
+  private void analyzePhoto(File photo) {
+    try {
+      InputImage image = InputImage.fromFilePath(this, Uri.fromFile(photo));
+      mlScanner.process(image)
+          .addOnSuccessListener(barcodes -> {
+            for (Barcode barcode : barcodes) {
+              String value = barcode.getRawValue();
+              if (value != null && !value.trim().isEmpty()) {
+                photo.delete();
+                finishWithCode(value);
+                return;
+              }
+            }
+
+            cameraExecutor.execute(() -> {
+              try {
+                Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
+                String decoded = decodeBitmap(bitmap);
+                if (bitmap != null) bitmap.recycle();
+                photo.delete();
+                if (decoded != null && !decoded.trim().isEmpty()) {
+                  finishWithCode(decoded);
+                } else {
+                  recognitionFailed();
+                }
+              } catch (Throwable t) {
+                photo.delete();
+                recognitionFailed();
+              }
+            });
+          })
+          .addOnFailureListener(e -> cameraExecutor.execute(() -> {
+            try {
+              Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
+              String decoded = decodeBitmap(bitmap);
+              if (bitmap != null) bitmap.recycle();
+              photo.delete();
+              if (decoded != null && !decoded.trim().isEmpty()) {
+                finishWithCode(decoded);
+              } else {
+                recognitionFailed();
+              }
+            } catch (Throwable t) {
+              photo.delete();
+              recognitionFailed();
+            }
+          }));
+    } catch (Throwable t) {
+      photo.delete();
+      recognitionFailed();
+    }
+  }
+
+  private void finishWithCode(String decoded) {
+    runOnUiThread(() -> {
+      if (isFinishing()) return;
+      previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
+      statusText.setText("QR-Code erkannt");
+      Intent data = new Intent();
+      data.putExtra("qr_value", decoded);
+      setResult(RESULT_OK, data);
+      finish();
+    });
+  }
+
+  private void recognitionFailed() {
+    runOnUiThread(() -> {
+      if (isFinishing()) return;
+      statusText.setText("Nicht erkannt. Bitte etwas mehr weißen Rand um den QR-Code lassen und erneut fotografieren.");
+      captureButton.setEnabled(true);
+      busy.set(false);
+    });
   }
 
   private String decodeBitmap(Bitmap original) {
@@ -313,6 +370,7 @@ public class ScannerActivity extends ComponentActivity {
   }
 
   @Override protected void onDestroy() {
+    if (mlScanner != null) mlScanner.close();
     if (cameraExecutor != null) cameraExecutor.shutdown();
     super.onDestroy();
   }
