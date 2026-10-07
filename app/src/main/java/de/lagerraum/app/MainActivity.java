@@ -6,7 +6,6 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
-import android.provider.MediaStore;
 import android.util.Base64;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
@@ -93,32 +92,12 @@ public class MainActivity extends Activity {
     webView.post(() -> webView.evaluateJavascript("window.onNativeQrScanned(" + json + ")", null));
   }
 
-  private String decodeQr(Bitmap bitmap) {
-    if (bitmap == null) return null;
-    try {
-      int width = bitmap.getWidth();
-      int height = bitmap.getHeight();
-      int[] pixels = new int[width * height];
-      bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-      RGBLuminanceSource source = new RGBLuminanceSource(width, height, pixels);
-      BinaryBitmap binary = new BinaryBitmap(new HybridBinarizer(source));
-      Result result = new MultiFormatReader().decode(binary);
-      return result == null ? null : result.getText();
-    } catch (Throwable t) {
-      return null;
-    }
-  }
-
   public class AndroidBridge {
     @JavascriptInterface
     public void scanQr() {
       runOnUiThread(() -> {
         try {
-          Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-          if (intent.resolveActivity(getPackageManager()) == null) {
-            notifyQrError("Keine Kamera-App gefunden.");
-            return;
-          }
+          Intent intent = new Intent(MainActivity.this, ScannerActivity.class);
           startActivityForResult(intent, QR_CAMERA);
         } catch (Throwable t) {
           notifyQrError("Kamera konnte nicht geöffnet werden.");
@@ -150,22 +129,9 @@ public class MainActivity extends Activity {
     super.onActivityResult(requestCode, resultCode, data);
 
     if (requestCode == QR_CAMERA) {
-      if (resultCode != RESULT_OK || data == null || data.getExtras() == null) {
-        notifyQrError("Aufnahme abgebrochen.");
-        return;
-      }
-
-      Object value = data.getExtras().get("data");
-      if (!(value instanceof Bitmap)) {
-        notifyQrError("Kamerabild konnte nicht gelesen werden.");
-        return;
-      }
-
-      String decoded = decodeQr((Bitmap) value);
-      if (decoded == null || decoded.trim().isEmpty()) {
-        notifyQrError("Kein QR-Code erkannt. Bitte den QR-Code größer und mittig aufnehmen.");
-      } else {
-        notifyQrResult(decoded);
+      if (resultCode == RESULT_OK && data != null) {
+        String decoded = data.getStringExtra("qr_value");
+        if (decoded != null && !decoded.trim().isEmpty()) notifyQrResult(decoded);
       }
       return;
     }
