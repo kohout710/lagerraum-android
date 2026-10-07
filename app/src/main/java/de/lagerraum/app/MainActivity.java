@@ -19,9 +19,10 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import com.google.zxing.BarcodeFormat;
-import com.journeyapps.barcodescanner.BarcodeEncoder;
 import com.google.zxing.integration.android.IntentIntegrator;
 import com.google.zxing.integration.android.IntentResult;
+import com.journeyapps.barcodescanner.BarcodeEncoder;
+import com.journeyapps.barcodescanner.CaptureActivity;
 
 import java.io.ByteArrayOutputStream;
 
@@ -30,6 +31,7 @@ public class MainActivity extends Activity {
   private static final int CAMERA_PERMISSION = 1002;
   private WebView webView;
   private ValueCallback<Uri[]> fileCallback;
+  private boolean scanAfterPermission = false;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -89,16 +91,36 @@ public class MainActivity extends Activity {
     else webView.restoreState(state);
   }
 
+  private void startQrScanner() {
+    try {
+      IntentIntegrator integrator = new IntentIntegrator(this);
+      integrator.setCaptureActivity(CaptureActivity.class);
+      integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
+      integrator.setPrompt("QR-Code scannen");
+      integrator.setBeepEnabled(true);
+      integrator.setOrientationLocked(false);
+      integrator.initiateScan();
+    } catch (Throwable t) {
+      notifyQrError("QR-Scanner konnte nicht gestartet werden.");
+    }
+  }
+
+  private void notifyQrError(String message) {
+    if (webView == null) return;
+    String json = org.json.JSONObject.quote(message);
+    webView.post(() -> webView.evaluateJavascript("window.onNativeQrError(" + json + ")", null));
+  }
+
   public class AndroidBridge {
     @JavascriptInterface
     public void scanQr() {
       runOnUiThread(() -> {
-        IntentIntegrator integrator = new IntentIntegrator(MainActivity.this);
-        integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
-        integrator.setPrompt("QR-Code scannen");
-        integrator.setBeepEnabled(true);
-        integrator.setOrientationLocked(false);
-        integrator.initiateScan();
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+          startQrScanner();
+        } else {
+          scanAfterPermission = true;
+          requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION);
+        }
       });
     }
 
@@ -112,6 +134,20 @@ public class MainActivity extends Activity {
         return "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
       } catch (Exception e) {
         return "";
+      }
+    }
+  }
+
+  @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    if (requestCode == CAMERA_PERMISSION) {
+      boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+      if (granted && scanAfterPermission) {
+        scanAfterPermission = false;
+        startQrScanner();
+      } else if (!granted) {
+        scanAfterPermission = false;
+        notifyQrError("Kamerazugriff wurde nicht erlaubt.");
       }
     }
   }
