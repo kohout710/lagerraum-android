@@ -1,17 +1,15 @@
 package de.lagerraum.app;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.util.Base64;
 import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
-import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -19,19 +17,22 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import com.google.zxing.BarcodeFormat;
-import com.google.zxing.integration.android.IntentIntegrator;
-import com.google.zxing.integration.android.IntentResult;
-import com.journeyapps.barcodescanner.BarcodeEncoder;
-import com.journeyapps.barcodescanner.CaptureActivity;
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.MultiFormatReader;
+import com.google.zxing.RGBLuminanceSource;
+import com.google.zxing.Result;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.common.HybridBinarizer;
+import com.google.zxing.qrcode.QRCodeWriter;
 
 import java.io.ByteArrayOutputStream;
 
 public class MainActivity extends Activity {
   private static final int FILE_CHOOSER = 1001;
-  private static final int CAMERA_PERMISSION = 1002;
+  private static final int QR_CAMERA = 2001;
+
   private WebView webView;
   private ValueCallback<Uri[]> fileCallback;
-  private boolean scanAfterPermission = false;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -74,35 +75,10 @@ public class MainActivity extends Activity {
         startActivityForResult(intent, FILE_CHOOSER);
         return true;
       }
-
-      @Override public void onPermissionRequest(PermissionRequest request) {
-        runOnUiThread(() -> {
-          if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            request.grant(request.getResources());
-          } else {
-            request.deny();
-            requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION);
-          }
-        });
-      }
     });
 
     if (state == null) webView.loadUrl("file:///android_asset/index.html");
     else webView.restoreState(state);
-  }
-
-  private void startQrScanner() {
-    try {
-      IntentIntegrator integrator = new IntentIntegrator(this);
-      integrator.setCaptureActivity(CaptureActivity.class);
-      integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
-      integrator.setPrompt("QR-Code scannen");
-      integrator.setBeepEnabled(true);
-      integrator.setOrientationLocked(false);
-      integrator.initiateScan();
-    } catch (Throwable t) {
-      notifyQrError("QR-Scanner konnte nicht gestartet werden.");
-    }
   }
 
   private void notifyQrError(String message) {
@@ -111,15 +87,41 @@ public class MainActivity extends Activity {
     webView.post(() -> webView.evaluateJavascript("window.onNativeQrError(" + json + ")", null));
   }
 
+  private void notifyQrResult(String value) {
+    if (webView == null) return;
+    String json = org.json.JSONObject.quote(value);
+    webView.post(() -> webView.evaluateJavascript("window.onNativeQrScanned(" + json + ")", null));
+  }
+
+  private String decodeQr(Bitmap bitmap) {
+    if (bitmap == null) return null;
+    try {
+      int width = bitmap.getWidth();
+      int height = bitmap.getHeight();
+      int[] pixels = new int[width * height];
+      bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+      RGBLuminanceSource source = new RGBLuminanceSource(width, height, pixels);
+      BinaryBitmap binary = new BinaryBitmap(new HybridBinarizer(source));
+      Result result = new MultiFormatReader().decode(binary);
+      return result == null ? null : result.getText();
+    } catch (Throwable t) {
+      return null;
+    }
+  }
+
   public class AndroidBridge {
     @JavascriptInterface
     public void scanQr() {
       runOnUiThread(() -> {
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-          startQrScanner();
-        } else {
-          scanAfterPermission = true;
-          requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION);
+        try {
+          Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+          if (intent.resolveActivity(getPackageManager()) == null) {
+            notifyQrError("Keine Kamera-App gefunden.");
+            return;
+          }
+          startActivityForResult(intent, QR_CAMERA);
+        } catch (Throwable t) {
+          notifyQrError("Kamera konnte nicht geöffnet werden.");
         }
       });
     }
@@ -127,42 +129,47 @@ public class MainActivity extends Activity {
     @JavascriptInterface
     public String generateQr(String content) {
       try {
-        BarcodeEncoder encoder = new BarcodeEncoder();
-        Bitmap bitmap = encoder.encodeBitmap(content, BarcodeFormat.QR_CODE, 700, 700);
+        int size = 700;
+        BitMatrix matrix = new QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, size, size);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+        for (int y = 0; y < size; y++) {
+          for (int x = 0; x < size; x++) {
+            bitmap.setPixel(x, y, matrix.get(x, y) ? Color.BLACK : Color.WHITE);
+          }
+        }
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
         return "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
-      } catch (Exception e) {
+      } catch (Throwable t) {
         return "";
       }
     }
   }
 
-  @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-    super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-    if (requestCode == CAMERA_PERMISSION) {
-      boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
-      if (granted && scanAfterPermission) {
-        scanAfterPermission = false;
-        startQrScanner();
-      } else if (!granted) {
-        scanAfterPermission = false;
-        notifyQrError("Kamerazugriff wurde nicht erlaubt.");
-      }
-    }
-  }
-
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-    IntentResult scan = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
-    if (scan != null) {
-      if (scan.getContents() != null && webView != null) {
-        String json = org.json.JSONObject.quote(scan.getContents());
-        webView.evaluateJavascript("window.onNativeQrScanned(" + json + ")", null);
+    super.onActivityResult(requestCode, resultCode, data);
+
+    if (requestCode == QR_CAMERA) {
+      if (resultCode != RESULT_OK || data == null || data.getExtras() == null) {
+        notifyQrError("Aufnahme abgebrochen.");
+        return;
+      }
+
+      Object value = data.getExtras().get("data");
+      if (!(value instanceof Bitmap)) {
+        notifyQrError("Kamerabild konnte nicht gelesen werden.");
+        return;
+      }
+
+      String decoded = decodeQr((Bitmap) value);
+      if (decoded == null || decoded.trim().isEmpty()) {
+        notifyQrError("Kein QR-Code erkannt. Bitte den QR-Code größer und mittig aufnehmen.");
+      } else {
+        notifyQrResult(decoded);
       }
       return;
     }
 
-    super.onActivityResult(requestCode, resultCode, data);
     if (requestCode == FILE_CHOOSER && fileCallback != null) {
       fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
       fileCallback = null;
