@@ -11,7 +11,6 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Bundle;
-import android.net.Uri;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
@@ -88,7 +87,7 @@ public class ScannerActivity extends ComponentActivity {
         FrameLayout.LayoutParams.MATCH_PARENT));
 
     TextView hint = new TextView(this);
-    hint.setText("QR-Code vollständig in den Rahmen legen");
+    hint.setText("Nur den QR-Code in den Rahmen legen");
     hint.setTextColor(Color.WHITE);
     hint.setTextSize(18f);
     hint.setGravity(Gravity.CENTER);
@@ -102,7 +101,7 @@ public class ScannerActivity extends ComponentActivity {
     root.addView(hint, hintParams);
 
     statusText = new TextView(this);
-    statusText.setText("Wenn der Code ruhig im Rahmen liegt, Foto aufnehmen.");
+    statusText.setText("Umgebung außerhalb des Rahmens wird möglichst ausgeblendet.");
     statusText.setTextColor(Color.WHITE);
     statusText.setTextSize(15f);
     statusText.setGravity(Gravity.CENTER);
@@ -223,56 +222,77 @@ public class ScannerActivity extends ComponentActivity {
   }
 
   private void analyzePhoto(File photo) {
-    try {
-      InputImage image = InputImage.fromFilePath(this, Uri.fromFile(photo));
-      mlScanner.process(image)
-          .addOnSuccessListener(barcodes -> {
-            for (Barcode barcode : barcodes) {
-              String value = barcode.getRawValue();
-              if (value != null && !value.trim().isEmpty()) {
-                photo.delete();
-                finishWithCode(value);
-                return;
-              }
-            }
+    cameraExecutor.execute(() -> {
+      try {
+        Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
+        photo.delete();
 
-            cameraExecutor.execute(() -> {
-              try {
-                Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
-                String decoded = decodeBitmap(bitmap);
-                if (bitmap != null) bitmap.recycle();
-                photo.delete();
-                if (decoded != null && !decoded.trim().isEmpty()) {
-                  finishWithCode(decoded);
-                } else {
-                  recognitionFailed();
-                }
-              } catch (Throwable t) {
-                photo.delete();
-                recognitionFailed();
-              }
-            });
-          })
-          .addOnFailureListener(e -> cameraExecutor.execute(() -> {
-            try {
-              Bitmap bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath());
-              String decoded = decodeBitmap(bitmap);
-              if (bitmap != null) bitmap.recycle();
-              photo.delete();
-              if (decoded != null && !decoded.trim().isEmpty()) {
-                finishWithCode(decoded);
-              } else {
-                recognitionFailed();
-              }
-            } catch (Throwable t) {
-              photo.delete();
-              recognitionFailed();
-            }
-          }));
-    } catch (Throwable t) {
-      photo.delete();
+        if (bitmap == null) {
+          recognitionFailed();
+          return;
+        }
+
+        // Zuerst nur den mittleren Scanbereich auswerten, damit Text,
+        // Verpackungsgrafiken und Farben außerhalb des Rahmens nicht stören.
+        float[] cropFractions = new float[]{0.56f, 0.66f, 0.76f, 0.90f};
+
+        for (float fraction : cropFractions) {
+          Bitmap crop = centerCrop(bitmap, fraction);
+          String zxing = decodeBitmap(crop);
+          if (zxing != null && !zxing.trim().isEmpty()) {
+            if (crop != bitmap) crop.recycle();
+            bitmap.recycle();
+            finishWithCode(zxing);
+            return;
+          }
+          if (crop != bitmap) crop.recycle();
+        }
+
+        runMlKitCrops(bitmap, cropFractions, 0);
+      } catch (Throwable t) {
+        photo.delete();
+        recognitionFailed();
+      }
+    });
+  }
+
+  private void runMlKitCrops(Bitmap original, float[] fractions, int index) {
+    if (index >= fractions.length) {
+      original.recycle();
       recognitionFailed();
+      return;
     }
+
+    Bitmap crop = centerCrop(original, fractions[index]);
+    InputImage image = InputImage.fromBitmap(crop, 0);
+
+    mlScanner.process(image)
+        .addOnSuccessListener(barcodes -> {
+          for (Barcode barcode : barcodes) {
+            String value = barcode.getRawValue();
+            if (value != null && !value.trim().isEmpty()) {
+              if (crop != original) crop.recycle();
+              original.recycle();
+              finishWithCode(value);
+              return;
+            }
+          }
+
+          if (crop != original) crop.recycle();
+          runMlKitCrops(original, fractions, index + 1);
+        })
+        .addOnFailureListener(e -> {
+          if (crop != original) crop.recycle();
+          runMlKitCrops(original, fractions, index + 1);
+        });
+  }
+
+  private Bitmap centerCrop(Bitmap bitmap, float fraction) {
+    int min = Math.min(bitmap.getWidth(), bitmap.getHeight());
+    int size = Math.max(64, Math.min(min, Math.round(min * fraction)));
+    int left = Math.max(0, (bitmap.getWidth() - size) / 2);
+    int top = Math.max(0, (bitmap.getHeight() - size) / 2);
+    return Bitmap.createBitmap(bitmap, left, top, size, size);
   }
 
   private void finishWithCode(String decoded) {
@@ -290,7 +310,7 @@ public class ScannerActivity extends ComponentActivity {
   private void recognitionFailed() {
     runOnUiThread(() -> {
       if (isFinishing()) return;
-      statusText.setText("Nicht erkannt. Bitte etwas mehr weißen Rand um den QR-Code lassen und erneut fotografieren.");
+      statusText.setText("Nicht erkannt. Jetzt wird nur der Bereich im Rahmen ausgewertet. Bitte etwas weißen Rand um den QR-Code lassen.");
       captureButton.setEnabled(true);
       busy.set(false);
     });
@@ -400,7 +420,7 @@ public class ScannerActivity extends ComponentActivity {
       super.onDraw(canvas);
       float w = getWidth();
       float h = getHeight();
-      float size = Math.min(w * 0.78f, h * 0.46f);
+      float size = Math.min(w * 0.64f, h * 0.38f);
       float left = (w - size) / 2f;
       float top = (h - size) / 2f - h * 0.08f;
       RectF box = new RectF(left, top, left + size, top + size);
