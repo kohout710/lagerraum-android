@@ -47,7 +47,7 @@ import com.google.mlkit.vision.barcode.common.Barcode;
 import com.google.mlkit.vision.common.InputImage;
 
 import java.io.File;
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -87,7 +87,7 @@ public class ScannerActivity extends ComponentActivity {
         FrameLayout.LayoutParams.MATCH_PARENT));
 
     TextView hint = new TextView(this);
-    hint.setText("Nur den QR-Code in den Rahmen legen");
+    hint.setText("QR-Code oder Barcode in den Rahmen legen");
     hint.setTextColor(Color.WHITE);
     hint.setTextSize(18f);
     hint.setGravity(Gravity.CENTER);
@@ -115,7 +115,7 @@ public class ScannerActivity extends ComponentActivity {
     root.addView(statusText, statusParams);
 
     captureButton = new Button(this);
-    captureButton.setText("QR-Code fotografieren");
+    captureButton.setText("Code fotografieren");
     FrameLayout.LayoutParams captureParams = new FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT, dp(58));
     captureParams.gravity = Gravity.BOTTOM;
@@ -146,7 +146,15 @@ public class ScannerActivity extends ComponentActivity {
     setContentView(root);
     cameraExecutor = Executors.newSingleThreadExecutor();
     BarcodeScannerOptions mlOptions = new BarcodeScannerOptions.Builder()
-        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+        .setBarcodeFormats(
+            Barcode.FORMAT_QR_CODE,
+            Barcode.FORMAT_EAN_13,
+            Barcode.FORMAT_EAN_8,
+            Barcode.FORMAT_UPC_A,
+            Barcode.FORMAT_UPC_E,
+            Barcode.FORMAT_CODE_128,
+            Barcode.FORMAT_CODE_39,
+            Barcode.FORMAT_ITF)
         .build();
     mlScanner = BarcodeScanning.getClient(mlOptions);
 
@@ -234,7 +242,7 @@ public class ScannerActivity extends ComponentActivity {
 
         // Zuerst nur den mittleren Scanbereich auswerten, damit Text,
         // Verpackungsgrafiken und Farben außerhalb des Rahmens nicht stören.
-        float[] cropFractions = new float[]{0.56f, 0.66f, 0.76f, 0.90f};
+        float[] cropFractions = new float[]{0.64f, 0.76f, 0.90f, 1.00f};
 
         for (float fraction : cropFractions) {
           Bitmap crop = centerCrop(bitmap, fraction);
@@ -288,18 +296,20 @@ public class ScannerActivity extends ComponentActivity {
   }
 
   private Bitmap centerCrop(Bitmap bitmap, float fraction) {
-    int min = Math.min(bitmap.getWidth(), bitmap.getHeight());
-    int size = Math.max(64, Math.min(min, Math.round(min * fraction)));
-    int left = Math.max(0, (bitmap.getWidth() - size) / 2);
-    int top = Math.max(0, (bitmap.getHeight() - size) / 2);
-    return Bitmap.createBitmap(bitmap, left, top, size, size);
+    int width = Math.max(64, Math.round(bitmap.getWidth() * fraction));
+    int height = Math.max(64, Math.round(bitmap.getHeight() * Math.min(1.0f, fraction + 0.08f)));
+    width = Math.min(width, bitmap.getWidth());
+    height = Math.min(height, bitmap.getHeight());
+    int left = Math.max(0, (bitmap.getWidth() - width) / 2);
+    int top = Math.max(0, (bitmap.getHeight() - height) / 2);
+    return Bitmap.createBitmap(bitmap, left, top, width, height);
   }
 
   private void finishWithCode(String decoded) {
     runOnUiThread(() -> {
       if (isFinishing()) return;
       previewView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
-      statusText.setText("QR-Code erkannt");
+      statusText.setText("Code erkannt");
       Intent data = new Intent();
       data.putExtra("qr_value", decoded);
       setResult(RESULT_OK, data);
@@ -310,7 +320,7 @@ public class ScannerActivity extends ComponentActivity {
   private void recognitionFailed() {
     runOnUiThread(() -> {
       if (isFinishing()) return;
-      statusText.setText("Nicht erkannt. Jetzt wird nur der Bereich im Rahmen ausgewertet. Bitte etwas weißen Rand um den QR-Code lassen.");
+      statusText.setText("Nicht erkannt. Bitte QR-Code oder Barcode vollständig und scharf im Rahmen platzieren.");
       captureButton.setEnabled(true);
       busy.set(false);
     });
@@ -356,7 +366,15 @@ public class ScannerActivity extends ComponentActivity {
       BinaryBitmap binary = new BinaryBitmap(new HybridBinarizer(source));
       MultiFormatReader reader = new MultiFormatReader();
       Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
-      hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(BarcodeFormat.QR_CODE));
+      hints.put(DecodeHintType.POSSIBLE_FORMATS, Arrays.asList(
+          BarcodeFormat.QR_CODE,
+          BarcodeFormat.EAN_13,
+          BarcodeFormat.EAN_8,
+          BarcodeFormat.UPC_A,
+          BarcodeFormat.UPC_E,
+          BarcodeFormat.CODE_128,
+          BarcodeFormat.CODE_39,
+          BarcodeFormat.ITF));
       hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
       hints.put(DecodeHintType.CHARACTER_SET, "UTF-8");
       reader.setHints(hints);
@@ -420,10 +438,11 @@ public class ScannerActivity extends ComponentActivity {
       super.onDraw(canvas);
       float w = getWidth();
       float h = getHeight();
-      float size = Math.min(w * 0.64f, h * 0.38f);
-      float left = (w - size) / 2f;
-      float top = (h - size) / 2f - h * 0.08f;
-      RectF box = new RectF(left, top, left + size, top + size);
+      float boxW = w * 0.82f;
+      float boxH = Math.min(h * 0.34f, boxW * 0.62f);
+      float left = (w - boxW) / 2f;
+      float top = (h - boxH) / 2f - h * 0.08f;
+      RectF box = new RectF(left, top, left + boxW, top + boxH);
 
       canvas.drawRect(0, 0, w, box.top, shade);
       canvas.drawRect(0, box.bottom, w, h, shade);
@@ -431,7 +450,7 @@ public class ScannerActivity extends ComponentActivity {
       canvas.drawRect(box.right, box.top, w, box.bottom, shade);
       canvas.drawRoundRect(box, 18f, 18f, frame);
 
-      float c = Math.min(size * 0.13f, 64f);
+      float c = Math.min(Math.min(box.width(), box.height()) * 0.16f, 64f);
       canvas.drawLine(box.left, box.top, box.left + c, box.top, corners);
       canvas.drawLine(box.left, box.top, box.left, box.top + c, corners);
       canvas.drawLine(box.right, box.top, box.right - c, box.top, corners);
