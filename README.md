@@ -1,4 +1,4 @@
-# Lagerraum 0.1
+# Lagerraum 0.2
 
 Sauberes Android-Gradle-Projekt für die Lebensmittel-Lager-App.
 
@@ -7,11 +7,8 @@ Sauberes Android-Gradle-Projekt für die Lebensmittel-Lager-App.
 - minSdk: 24
 - targetSdk: 36
 - compileSdk: 36
-- Version: 0.1 / versionCode 1
+- Version: 0.2 / versionCode 2
 - Java 17
-- Android Gradle Plugin 9.3.0
 
-## Bauen
-Das Projekt enthält `.github/workflows/build-apk.yml`. GitHub Actions baut daraus automatisch eine echte Debug-APK mit offiziellem Android SDK und Gradle.
-
-Alternativ lässt sich das Projekt direkt in Android Studio öffnen und mit **Build > Build APK(s)** bauen.
+## APK-Build
+Das Projekt baut über GitHub Actions eine Release-APK. Die Signierung erfolgt mit einem dauerhaft hinterlegten Lagerraum-Signierschlüssel, damit spätere Versionen als Updates installiert werden können.
