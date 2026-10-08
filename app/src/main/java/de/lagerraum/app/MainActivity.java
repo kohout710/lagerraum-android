@@ -28,14 +28,18 @@ import com.google.zxing.common.HybridBinarizer;
 import com.google.zxing.qrcode.QRCodeWriter;
 
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
   private static final int FILE_CHOOSER = 1001;
+  private static final int BACKUP_SAVE = 1002;
   private static final int QR_CAMERA = 2001;
   private static final int NOTIFICATION_PERMISSION = 3002;
 
   private WebView webView;
   private ValueCallback<Uri[]> fileCallback;
+  private String pendingBackupJson;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -96,6 +100,14 @@ public class MainActivity extends Activity {
     webView.post(() -> webView.evaluateJavascript("window.onNativeQrScanned(" + json + ")", null));
   }
 
+  private void notifyBackupResult(boolean success, String message) {
+    if (webView == null) return;
+    String json = org.json.JSONObject.quote(message == null ? "" : message);
+    webView.post(() -> webView.evaluateJavascript(
+        "window.onNativeBackupResult(" + success + "," + json + ")", null));
+  }
+
+
   public class AndroidBridge {
     @JavascriptInterface
     public void scanQr() {
@@ -105,6 +117,24 @@ public class MainActivity extends Activity {
           startActivityForResult(intent, QR_CAMERA);
         } catch (Throwable t) {
           notifyQrError("Kamera konnte nicht geöffnet werden.");
+        }
+      });
+    }
+
+    @JavascriptInterface
+    public void saveBackup(String fileName, String json) {
+      pendingBackupJson = json == null ? "{}" : json;
+      runOnUiThread(() -> {
+        try {
+          Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+          intent.addCategory(Intent.CATEGORY_OPENABLE);
+          intent.setType("application/json");
+          intent.putExtra(Intent.EXTRA_TITLE,
+              fileName == null || fileName.trim().isEmpty() ? "lagerraum-backup.json" : fileName);
+          startActivityForResult(intent, BACKUP_SAVE);
+        } catch (Throwable t) {
+          pendingBackupJson = null;
+          notifyBackupResult(false, "Speicherdialog konnte nicht geöffnet werden.");
         }
       });
     }
@@ -172,6 +202,24 @@ public class MainActivity extends Activity {
       if (resultCode == RESULT_OK && data != null) {
         String decoded = data.getStringExtra("qr_value");
         if (decoded != null && !decoded.trim().isEmpty()) notifyQrResult(decoded);
+      }
+      return;
+    }
+
+    if (requestCode == BACKUP_SAVE) {
+      String json = pendingBackupJson;
+      pendingBackupJson = null;
+      if (resultCode == RESULT_OK && data != null && data.getData() != null && json != null) {
+        try (OutputStream out = getContentResolver().openOutputStream(data.getData())) {
+          if (out == null) throw new IllegalStateException("Datei konnte nicht geöffnet werden.");
+          out.write(json.getBytes(StandardCharsets.UTF_8));
+          out.flush();
+          notifyBackupResult(true, "Backup wurde erfolgreich gespeichert.");
+        } catch (Throwable t) {
+          notifyBackupResult(false, "Backup konnte nicht gespeichert werden.");
+        }
+      } else {
+        notifyBackupResult(false, "Speichern wurde abgebrochen.");
       }
       return;
     }
