@@ -33,9 +33,9 @@ jobs:
           KEY_ALIAS: ${{ secrets.LAGERRAUM_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.LAGERRAUM_KEY_PASSWORD }}
         run: |
-          /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner sign             --ks "$RUNNER_TEMP/lagerraum-release.jks"             --ks-pass "pass:$STORE_PASSWORD"             --ks-key-alias "$KEY_ALIAS"             --key-pass "pass:$KEY_PASSWORD"             --out app/build/outputs/apk/release/Lagerraum-0.2.31-signed.apk             app/build/outputs/apk/release/app-release-unsigned.apk
-          /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner verify --verbose app/build/outputs/apk/release/Lagerraum-0.2.31-signed.apk
+          /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner sign             --ks "$RUNNER_TEMP/lagerraum-release.jks"             --ks-pass "pass:$STORE_PASSWORD"             --ks-key-alias "$KEY_ALIAS"             --key-pass "pass:$KEY_PASSWORD"             --out app/build/outputs/apk/release/Lagerraum-0.2.32-signed.apk             app/build/outputs/apk/release/app-release-unsigned.apk
+          /usr/local/lib/android/sdk/build-tools/36.0.0/apksigner verify --verbose app/build/outputs/apk/release/Lagerraum-0.2.32-signed.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: Lagerraum-0.2.31-signed-apk
-          path: app/build/outputs/apk/release/Lagerraum-0.2.31-signed.apk
+          name: Lagerraum-0.2.32-signed-apk
+          path: app/build/outputs/apk/release/Lagerraum-0.2.32-signed.apk
