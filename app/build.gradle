@@ -8,8 +8,8 @@ android {
     applicationId 'de.lagerraum.app'
     minSdk 24
     targetSdk 36
-    versionCode 35
-    versionName '0.2.34'
+    versionCode 36
+    versionName '0.2.35'
   }
 
   compileOptions {
