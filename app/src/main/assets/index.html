@@ -51,7 +51,8 @@ window.onNativePhotoCaptured=function(data){
  document.getElementById('photoAccept').onclick=()=>{
   capturedProductPhoto=pendingProductPhoto;
   pendingProductPhoto='';
-  const img=document.getElementById(productPhotoTarget+'PhotoPreview');
+  let img=document.getElementById(productPhotoTarget+'PhotoPreview');
+  if(!img && productPhotoTarget==='edit'){img=document.createElement('img');img.id='editPhotoPreview';img.className='photoPreview';img.alt='Vorschau';const input=document.getElementById('editPhoto');if(input)input.parentElement.insertAdjacentElement('afterend',img)}
   if(img){img.src=capturedProductPhoto;img.classList.remove('hidden')}
   overlay.style.display='none';
  };
