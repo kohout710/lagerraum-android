@@ -5,6 +5,11 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.provider.MediaStore;
+import androidx.core.content.FileProvider;
+import java.io.File;
+import java.io.FileInputStream;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
@@ -35,11 +40,13 @@ public class MainActivity extends Activity {
   private static final int FILE_CHOOSER = 1001;
   private static final int BACKUP_SAVE = 1002;
   private static final int QR_CAMERA = 2001;
+  private static final int PRODUCT_CAMERA = 2002;
   private static final int NOTIFICATION_PERMISSION = 3002;
 
   private WebView webView;
   private ValueCallback<Uri[]> fileCallback;
   private String pendingBackupJson;
+  private File pendingPhotoFile;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -117,6 +124,25 @@ public class MainActivity extends Activity {
           startActivityForResult(intent, QR_CAMERA);
         } catch (Throwable t) {
           notifyQrError("Kamera konnte nicht geöffnet werden.");
+        }
+      });
+    }
+
+    @JavascriptInterface
+    public void takeProductPhoto() {
+      runOnUiThread(() -> {
+        try {
+          pendingPhotoFile = File.createTempFile("product-photo-", ".jpg", getCacheDir());
+          Uri uri = FileProvider.getUriForFile(MainActivity.this,
+              getPackageName() + ".fileprovider", pendingPhotoFile);
+          Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+          intent.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+          intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+          startActivityForResult(intent, PRODUCT_CAMERA);
+        } catch (Throwable t) {
+          if (pendingPhotoFile != null) pendingPhotoFile.delete();
+          pendingPhotoFile = null;
+          webView.post(() -> webView.evaluateJavascript("window.onNativePhotoError('Kamera konnte nicht geöffnet werden.')", null));
         }
       });
     }
@@ -203,6 +229,38 @@ public class MainActivity extends Activity {
         String decoded = data.getStringExtra("qr_value");
         if (decoded != null && !decoded.trim().isEmpty()) notifyQrResult(decoded);
       }
+      return;
+    }
+
+    if (requestCode == PRODUCT_CAMERA) {
+      File photoFile = pendingPhotoFile;
+      pendingPhotoFile = null;
+      if (resultCode == RESULT_OK && photoFile != null && photoFile.length() > 0) {
+        try {
+          BitmapFactory.Options bounds = new BitmapFactory.Options();
+          bounds.inJustDecodeBounds = true;
+          BitmapFactory.decodeFile(photoFile.getAbsolutePath(), bounds);
+          int sample = 1;
+          while (Math.max(bounds.outWidth / sample, bounds.outHeight / sample) > 1200) sample *= 2;
+          BitmapFactory.Options opts = new BitmapFactory.Options();
+          opts.inSampleSize = sample;
+          Bitmap bitmap = BitmapFactory.decodeFile(photoFile.getAbsolutePath(), opts);
+          if (bitmap == null) throw new IllegalStateException("Bild konnte nicht gelesen werden");
+          int w = bitmap.getWidth(), h = bitmap.getHeight();
+          float factor = Math.min(1f, 900f / Math.max(w, h));
+          Bitmap resized = factor < 1f ? Bitmap.createScaledBitmap(bitmap, Math.round(w * factor), Math.round(h * factor), true) : bitmap;
+          ByteArrayOutputStream out = new ByteArrayOutputStream();
+          resized.compress(Bitmap.CompressFormat.JPEG, 80, out);
+          String photo = "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+          String encoded = org.json.JSONObject.quote(photo);
+          webView.post(() -> webView.evaluateJavascript("window.onNativePhotoCaptured(" + encoded + ")", null));
+          if (resized != bitmap) resized.recycle();
+          bitmap.recycle();
+        } catch (Throwable t) {
+          webView.post(() -> webView.evaluateJavascript("window.onNativePhotoError('Foto konnte nicht verarbeitet werden.')", null));
+        }
+      }
+      if (photoFile != null) photoFile.delete();
       return;
     }
 
