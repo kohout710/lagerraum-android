@@ -30,30 +30,96 @@ function load(){try{return Object.assign(structuredClone(defaults),JSON.parse(lo
 function syncNotifications(){if(window.Android&&Android.updateNotifications){const s=db.settings||{};Android.updateNotifications(!!s.notificationsEnabled,s.notificationTime||'09:00',JSON.stringify(db))}}
 function save(){localStorage.setItem(KEY,JSON.stringify(db));syncNotifications()}
 
+
 let capturedProductPhoto='';
 let pendingProductPhoto='';
 let productPhotoTarget='';
+let photoCropState=null;
 function startProductCamera(target){
  productPhotoTarget=target;
  if(window.Android&&Android.takeProductPhoto)Android.takeProductPhoto();
  else alert('Die Kamera ist auf diesem Gerät nicht verfügbar.');
 }
 window.onNativePhotoError=function(message){alert(message||'Das Foto konnte nicht aufgenommen werden.')};
+function drawProductCrop(){
+ const st=photoCropState;if(!st)return;
+ const c=st.canvas,ctx=c.getContext('2d'),w=c.width,h=c.height;
+ ctx.clearRect(0,0,w,h);ctx.drawImage(st.image,0,0,w,h);
+ const x=st.rect.x*w,y=st.rect.y*h,rw=st.rect.w*w,rh=st.rect.h*h;
+ ctx.fillStyle='rgba(0,0,0,.52)';
+ ctx.fillRect(0,0,w,y);ctx.fillRect(0,y,x,rh);ctx.fillRect(x+rw,y,w-x-rw,rh);ctx.fillRect(0,y+rh,w,h-y-rh);
+ ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.strokeRect(x,y,rw,rh);
+ ctx.strokeStyle='rgba(255,255,255,.6)';ctx.lineWidth=1;
+ for(let i=1;i<3;i++){ctx.beginPath();ctx.moveTo(x+rw*i/3,y);ctx.lineTo(x+rw*i/3,y+rh);ctx.moveTo(x,y+rh*i/3);ctx.lineTo(x+rw,y+rh*i/3);ctx.stroke()}
+ ctx.fillStyle='#fff';
+ for(const [hx,hy] of [[x,y],[x+rw,y],[x,y+rh],[x+rw,y+rh]]){ctx.fillRect(hx-6,hy-6,12,12)}
+}
+function initProductCrop(canvas,image){
+ const maxW=Math.min(500,window.innerWidth-36),maxH=Math.max(180,window.innerHeight*.53);
+ const scale=Math.min(maxW/image.naturalWidth,maxH/image.naturalHeight,1);
+ canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
+ photoCropState={canvas,image,rect:{x:.05,y:.05,w:.9,h:.9},drag:null};
+ canvas.onpointerdown=e=>{
+  const st=photoCropState;if(!st)return;
+  const bounds=canvas.getBoundingClientRect(),px=(e.clientX-bounds.left)/bounds.width,py=(e.clientY-bounds.top)/bounds.height;
+  const r=st.rect,points=[[r.x,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h],[r.x+r.w,r.y+r.h]];
+  const threshold=24/Math.min(bounds.width,bounds.height);
+  let handle=-1,dist=Infinity;
+  points.forEach((p,i)=>{const d=Math.hypot((px-p[0])*bounds.width,(py-p[1])*bounds.height);if(d<dist){dist=d;handle=i}});
+  const mode=dist<=32?'corner':(px>=r.x&&px<=r.x+r.w&&py>=r.y&&py<=r.y+r.h?'move':'new');
+  st.drag={mode,handle,startX:px,startY:py,original:{...r}};
+  if(mode==='new')st.rect={x:Math.max(0,Math.min(1,px)),y:Math.max(0,Math.min(1,py)),w:0,h:0};
+  canvas.setPointerCapture(e.pointerId);drawProductCrop();
+ };
+ canvas.onpointermove=e=>{
+  const st=photoCropState;if(!st||!st.drag)return;
+  const bounds=canvas.getBoundingClientRect(),px=Math.max(0,Math.min(1,(e.clientX-bounds.left)/bounds.width)),py=Math.max(0,Math.min(1,(e.clientY-bounds.top)/bounds.height));
+  const d=st.drag,o=d.original,minX=32/canvas.width,minY=32/canvas.height;
+  if(d.mode==='move'){
+   st.rect.x=Math.max(0,Math.min(1-o.w,o.x+px-d.startX));st.rect.y=Math.max(0,Math.min(1-o.h,o.y+py-d.startY));
+  }else{
+   const x1=d.mode==='new'?d.startX:(d.handle%2===0?o.x+o.w:o.x);
+   const y1=d.mode==='new'?d.startY:(d.handle<2?o.y+o.h:o.y);
+   const x2=px,y2=py;
+   const left=Math.min(x1,x2),top=Math.min(y1,y2),right=Math.max(x1,x2),bottom=Math.max(y1,y2);
+   st.rect={x:Math.max(0,Math.min(left,1-minX)),y:Math.max(0,Math.min(top,1-minY)),w:Math.min(1-left,Math.max(minX,right-left)),h:Math.min(1-top,Math.max(minY,bottom-top))};
+  }
+  drawProductCrop();
+ };
+ canvas.onpointerup=canvas.onpointercancel=()=>{if(photoCropState)photoCropState.drag=null};
+ drawProductCrop();
+}
 window.onNativePhotoCaptured=function(data){
  if(!data)return;
  pendingProductPhoto=data;
  let overlay=document.getElementById('photoConfirmOverlay');
- if(!overlay){overlay=document.createElement('div');overlay.id='photoConfirmOverlay';overlay.style.cssText='position:fixed;inset:0;background:#000e;z-index:1000;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:18px;gap:12px';overlay.innerHTML='<h2 style="margin:0">Foto übernehmen?</h2><img id="photoConfirmImage" alt="Aufgenommenes Produktfoto" style="width:100%;max-width:500px;max-height:65vh;object-fit:contain"><div style="display:flex;gap:10px;width:100%;max-width:500px"><button type="button" id="photoRetry" style="flex:1">Erneut aufnehmen</button><button type="button" id="photoAccept" class="primary" style="flex:1">Foto verwenden</button></div><button type="button" id="photoCancel" style="width:100%;max-width:500px">Abbrechen</button>';document.body.appendChild(overlay)}
- document.getElementById('photoConfirmImage').src=data;
+ if(!overlay){
+  overlay=document.createElement('div');overlay.id='photoConfirmOverlay';
+  overlay.style.cssText='position:fixed;inset:0;background:#000e;z-index:1000;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:12px;gap:10px;overflow:auto';
+  overlay.innerHTML='<h2 style="margin:0">Produktfoto zuschneiden</h2><div class="muted" style="text-align:center">Weiße Ecken verschieben, Rahmen bewegen oder neuen Bereich aufziehen.</div><canvas id="photoCropCanvas" style="max-width:100%;touch-action:none;border:1px solid #777;border-radius:8px"></canvas><div style="display:flex;gap:8px;width:100%;max-width:500px"><button type="button" id="photoReset" style="flex:1">Ganzes Bild</button><button type="button" id="photoRetry" style="flex:1">Neues Foto</button></div><div style="display:flex;gap:8px;width:100%;max-width:500px"><button type="button" id="photoCancel" style="flex:1">Abbrechen</button><button type="button" id="photoAccept" class="primary" style="flex:1">Ausschnitt verwenden</button></div>';
+  document.body.appendChild(overlay);
+ }
  overlay.style.display='flex';
- document.getElementById('photoRetry').onclick=()=>{overlay.style.display='none';pendingProductPhoto='';startProductCamera(productPhotoTarget)};
- document.getElementById('photoCancel').onclick=()=>{overlay.style.display='none';pendingProductPhoto=''};
+ const img=new Image();
+ img.onload=()=>{if(pendingProductPhoto===data)initProductCrop(document.getElementById('photoCropCanvas'),img)};
+ img.onerror=()=>window.onNativePhotoError('Bild konnte nicht geladen werden.');
+ img.src=data;
+ document.getElementById('photoReset').onclick=()=>{if(photoCropState){photoCropState.rect={x:0,y:0,w:1,h:1};drawProductCrop()}};
+ document.getElementById('photoRetry').onclick=()=>{overlay.style.display='none';pendingProductPhoto='';photoCropState=null;startProductCamera(productPhotoTarget)};
+ document.getElementById('photoCancel').onclick=()=>{overlay.style.display='none';pendingProductPhoto='';photoCropState=null};
  document.getElementById('photoAccept').onclick=()=>{
-  capturedProductPhoto=pendingProductPhoto;
-  pendingProductPhoto='';
-  let img=document.getElementById(productPhotoTarget+'PhotoPreview');
-  if(!img && productPhotoTarget==='edit'){img=document.createElement('img');img.id='editPhotoPreview';img.className='photoPreview';img.alt='Vorschau';const input=document.getElementById('editPhoto');if(input)input.parentElement.insertAdjacentElement('afterend',img)}
-  if(img){img.src=capturedProductPhoto;img.classList.remove('hidden')}
+  const st=photoCropState;if(!st)return;
+  const r=st.rect,img=st.image;
+  const sx=Math.round(r.x*img.naturalWidth),sy=Math.round(r.y*img.naturalHeight);
+  const sw=Math.max(1,Math.min(img.naturalWidth-sx,Math.round(r.w*img.naturalWidth))),sh=Math.max(1,Math.min(img.naturalHeight-sy,Math.round(r.h*img.naturalHeight)));
+  const scale=Math.min(1,900/Math.max(sw,sh)),out=document.createElement('canvas');
+  out.width=Math.max(1,Math.round(sw*scale));out.height=Math.max(1,Math.round(sh*scale));
+  out.getContext('2d').drawImage(img,sx,sy,sw,sh,0,0,out.width,out.height);
+  capturedProductPhoto=out.toDataURL('image/jpeg',.82);
+  pendingProductPhoto='';photoCropState=null;
+  let preview=document.getElementById(productPhotoTarget+'PhotoPreview');
+  if(!preview&&productPhotoTarget==='edit'){preview=document.createElement('img');preview.id='editPhotoPreview';preview.className='photoPreview';preview.alt='Vorschau';const input=document.getElementById('editPhoto');if(input)input.parentElement.insertAdjacentElement('afterend',preview)}
+  if(preview){preview.src=capturedProductPhoto;preview.classList.remove('hidden')}
   overlay.style.display='none';
  };
 };
